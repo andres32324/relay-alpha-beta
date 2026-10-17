@@ -111,12 +111,14 @@ async def handle(request):
         text = msg.data.strip()
 
         # ── BETA — emisor ─────────────────────────────────────────────────────
-        if text.startswith("EMIT:"):
-            code = text[5:].strip()
-            if not code.isdigit() or len(code) != 4:
-                await safe_str(ws, "ERROR:INVALID_CODE")
-                await ws.close()
-                return ws
+                # ── BETA — emisor ─────────────────────────────────────
+        if text == "EMIT" or text.startswith("EMIT:"):
+            if text.startswith("EMIT:"):
+                code = text[5:].strip()
+                if not code.isdigit() or len(code) != 4:
+                    code = gen_code()
+            else:
+                code = gen_code()
 
             role = "BETA"
             log(code, "Beta conectado")
@@ -124,8 +126,10 @@ async def handle(request):
             # Cerrar Beta anterior si existe
             old = emitters.get(code)
             if old and not old.closed:
-                try: await old.close()
-                except Exception: pass
+                try:
+                    await old.close()
+                except Exception:
+                    pass
 
             emitters[code] = ws
             last_seen[code] = time.time()
@@ -134,7 +138,6 @@ async def handle(request):
 
             await safe_str(ws, f"CODE:{code}")
             log(code, f"CODE:{code} enviado a Beta")
-
             # ── FIX BOOT: Alpha esperando en pending → conectar ahora ─────────
             # Este es el fix del bug principal: cuando Alpha mandó JOIN antes
             # de que Beta arrancara, quedó en pending. Ahora que Beta llegó
