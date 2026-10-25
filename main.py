@@ -207,11 +207,14 @@ async def handle(request):
 
             watchers.setdefault(code, set())
 
-# Después — pequeño delay
-await asyncio.sleep(0.5)
-await safe_str(ws, f"CODE:{code}")
-            log(code, f"CODE:{code} enviado a Beta")
+                        emitters[code] = ws
+            last_seen[code] = time.time()
 
+            watchers.setdefault(code, set())
+
+            await asyncio.sleep(0.2)
+            await safe_str(ws, f"CODE:{code}")
+            log(code, f"CODE:{code} enviado a Beta")
             # Conectar automáticamente al Alpha en espera.
             alpha_pending = pending.get(code)
 
