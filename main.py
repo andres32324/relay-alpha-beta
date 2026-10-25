@@ -207,11 +207,6 @@ async def handle(request):
 
             watchers.setdefault(code, set())
 
-                        emitters[code] = ws
-            last_seen[code] = time.time()
-
-            watchers.setdefault(code, set())
-
             await asyncio.sleep(0.2)
             await safe_str(ws, f"CODE:{code}")
             log(code, f"CODE:{code} enviado a Beta")
@@ -489,3 +484,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+            
