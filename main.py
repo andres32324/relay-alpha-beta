@@ -11,6 +11,7 @@ pending   = {}
 watchers  = {}
 last_info = {}
 last_seen = {}
+pending_stops = {}   # code → asyncio.Task (STOP diferido)
 
 
 def log(code, msg):
@@ -46,6 +47,34 @@ async def safe_bytes(ws, data):
     return False
 
 
+def cancel_pending_stop(code):
+    """Cancelar STOP diferido si Alpha reconectó antes del timeout."""
+    task = pending_stops.pop(code, None)
+    if task and not task.done():
+        task.cancel()
+        log(code, "STOP cancelado — Alpha reconectó a tiempo")
+
+
+async def send_stop_delayed(code, delay=4.0):
+    """Enviar STOP a Beta solo si Alpha no reconectó en <delay> segundos."""
+    try:
+        await asyncio.sleep(delay)
+        # Solo mandar STOP si Alpha sigue desconectado (no hay listener activo)
+        alpha = listeners.get(code)
+        alpha_p = pending.get(code)
+        if (alpha is None or alpha.closed) and (alpha_p is None or alpha_p.closed):
+            beta = emitters.get(code)
+            if beta is not None and not beta.closed:
+                await safe_str(beta, "STOP")
+                log(code, f"STOP enviado a Beta (Alpha no reconectó en {delay}s)")
+        else:
+            log(code, "STOP omitido — Alpha ya reconectó")
+    except asyncio.CancelledError:
+        pass  # Cancelado porque Alpha reconectó
+    finally:
+        pending_stops.pop(code, None)
+
+
 async def cleanup(code, role, ws):
     log(code, f"Limpiando {role}")
     if role == "BETA":
@@ -66,9 +95,11 @@ async def cleanup(code, role, ws):
         if was_p:
             pending.pop(code, None)
         if was_l and listeners.get(code) is None:
-            beta = emitters.get(code)
-            if beta is not None and not beta.closed:
-                await safe_str(beta, "STOP")
+            # No mandar STOP inmediatamente — esperar 4s por si Alpha reconecta
+            cancel_pending_stop(code)
+            task = asyncio.create_task(send_stop_delayed(code, delay=4.0))
+            pending_stops[code] = task
+            log(code, "Alpha desconectado — STOP diferido 4s")
     elif role == "WATCHER":
         group = watchers.get(code)
         if group is not None:
@@ -220,6 +251,9 @@ async def handle(request):
 
             role = "ALPHA"
 
+            # Cancelar STOP diferido si Alpha estaba reconectando
+            cancel_pending_stop(code)
+
             old = listeners.get(code)
             if old is not None and not old.closed:
                 try:
@@ -252,6 +286,14 @@ async def handle(request):
                     # No reenviar mensajes que son exclusivos del servidor
                     if txt in ("READY", "OK", "WAITING", "WATCHING", "EMITTER_GONE") or txt.startswith("CODE:") or txt.startswith("ERROR:"):
                         log(code, f"Alpha envio mensaje reservado (ignorado): {txt}")
+                        continue
+                    # RESUME: Alpha pide que el servidor reenvíe READY a Beta
+                    # sin necesidad de desconectar y reconectar
+                    if txt == "RESUME":
+                        beta = emitters.get(code)
+                        if beta is not None and not beta.closed:
+                            await safe_str(beta, "READY")
+                            log(code, "Alpha RESUME → READY enviado a Beta")
                         continue
                     beta = emitters.get(code)
                     if beta is not None and not beta.closed:
