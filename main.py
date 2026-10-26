@@ -55,7 +55,7 @@ def cancel_pending_stop(code):
         log(code, "STOP cancelado — Alpha reconectó a tiempo")
 
 
-async def send_stop_delayed(code, delay=4.0):
+async def send_stop_delayed(code, delay=8.0):
     """Enviar STOP a Beta solo si Alpha no reconectó en <delay> segundos."""
     try:
         await asyncio.sleep(delay)
@@ -95,11 +95,12 @@ async def cleanup(code, role, ws):
         if was_p:
             pending.pop(code, None)
         if was_l and listeners.get(code) is None:
-            # No mandar STOP inmediatamente — esperar 4s por si Alpha reconecta
+            # No mandar STOP inmediatamente — esperar 8s por si Alpha reconecta
+            # (8s cubre el ciclo: 1er reintento 2s + falla + 2º reintento 4s ≈ 7s)
             cancel_pending_stop(code)
-            task = asyncio.create_task(send_stop_delayed(code, delay=4.0))
+            task = asyncio.create_task(send_stop_delayed(code, delay=8.0))
             pending_stops[code] = task
-            log(code, "Alpha desconectado — STOP diferido 4s")
+            log(code, "Alpha desconectado — STOP diferido 8s")
     elif role == "WATCHER":
         group = watchers.get(code)
         if group is not None:
@@ -251,7 +252,7 @@ async def handle(request):
 
             role = "ALPHA"
 
-            # Cancelar STOP diferido si Alpha estaba reconectando
+            # Cancelar cualquier STOP diferido previo
             cancel_pending_stop(code)
 
             old = listeners.get(code)
@@ -266,6 +267,11 @@ async def handle(request):
                     await old_p.close()
                 except Exception:
                     pass
+
+            # Cancelar DE NUEVO: durante los await old.close() el cleanup de la
+            # conexión vieja pudo haber creado un nuevo timer en pending_stops.
+            # (asyncio ejecuta el cleanup de old_ws mientras esperamos el cierre)
+            cancel_pending_stop(code)
 
             beta = emitters.get(code)
             if beta is not None and not beta.closed:
