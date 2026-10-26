@@ -26,7 +26,6 @@ def gen_code():
     raise RuntimeError("Sin codigos disponibles")
 
 
-# ── La clave: usar "not ws.closed" igual que el relay funcional ───────────────
 async def safe_str(ws, msg):
     try:
         if not ws.closed:
@@ -54,10 +53,10 @@ async def cleanup(code, role, ws):
             emitters.pop(code, None)
             last_seen.pop(code, None)
             alpha = listeners.get(code)
-            if alpha and not alpha.closed:
+            if alpha is not None and not alpha.closed:
                 await safe_str(alpha, "EMITTER_GONE")
             alpha_p = pending.get(code)
-            if alpha_p and not alpha_p.closed:
+            if alpha_p is not None and not alpha_p.closed:
                 await safe_str(alpha_p, "EMITTER_GONE")
     elif role == "ALPHA":
         was_l = listeners.get(code) is ws
@@ -68,7 +67,7 @@ async def cleanup(code, role, ws):
             pending.pop(code, None)
         if was_l and listeners.get(code) is None:
             beta = emitters.get(code)
-            if beta and not beta.closed:
+            if beta is not None and not beta.closed:
                 await safe_str(beta, "STOP")
     elif role == "WATCHER":
         group = watchers.get(code)
@@ -145,7 +144,7 @@ async def handle(request):
             log(code, "Beta conectado")
 
             old = emitters.get(code)
-            if old and not old.closed:
+            if old is not None and not old.closed:
                 try:
                     await old.close()
                 except Exception:
@@ -155,32 +154,32 @@ async def handle(request):
             last_seen[code] = time.time()
             watchers.setdefault(code, set())
 
-            # Enviar CODE: directamente, igual que el relay funcional
             await safe_str(ws, f"CODE:{code}")
             log(code, f"CODE:{code} enviado")
 
-            # Conectar Alpha en espera si existe
+            # Alpha en espera (pending)
             alpha_p = pending.get(code)
-            if alpha_p and not alpha_p.closed:
+            if alpha_p is not None and not alpha_p.closed:
                 pending.pop(code, None)
                 listeners[code] = alpha_p
                 await safe_str(alpha_p, "OK")
                 await safe_str(ws, "READY")
                 if code in last_info:
                     await safe_str(alpha_p, last_info[code])
-                log(code, "Alpha en espera conectado; READY enviado")
+                log(code, "Alpha en espera → READY enviado a Beta")
             else:
+                # Alpha ya conectado (listener)
                 alpha = listeners.get(code)
-                if alpha and not alpha.closed:
+                if alpha is not None and not alpha.closed:
                     await safe_str(alpha, "OK")
                     await safe_str(ws, "READY")
-                    log(code, "Alpha existente; READY enviado")
+                    log(code, "Alpha ya conectado → READY enviado a Beta")
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
                     last_seen[code] = time.time()
                     alpha = listeners.get(code)
-                    if alpha and not alpha.closed:
+                    if alpha is not None and not alpha.closed:
                         if not await safe_bytes(alpha, msg.data):
                             listeners.pop(code, None)
 
@@ -190,7 +189,7 @@ async def handle(request):
                     if txt.startswith("INFO|"):
                         last_info[code] = txt
                         alpha = listeners.get(code)
-                        if alpha and not alpha.closed:
+                        if alpha is not None and not alpha.closed:
                             await safe_str(alpha, txt)
                         dead = set()
                         for w in list(watchers.get(code, set())):
@@ -201,7 +200,7 @@ async def handle(request):
                         watchers.get(code, set()).difference_update(dead)
                     else:
                         alpha = listeners.get(code)
-                        if alpha and not alpha.closed:
+                        if alpha is not None and not alpha.closed:
                             await safe_str(alpha, txt)
 
                 elif msg.type in (
@@ -220,27 +219,28 @@ async def handle(request):
                 return ws
 
             role = "ALPHA"
+
             old = listeners.get(code)
-            if old and not old.closed:
+            if old is not None and not old.closed:
                 try:
                     await old.close()
                 except Exception:
                     pass
             old_p = pending.get(code)
-            if old_p and not old_p.closed:
+            if old_p is not None and not old_p.closed:
                 try:
                     await old_p.close()
                 except Exception:
                     pass
 
             beta = emitters.get(code)
-            if beta and not beta.closed:
+            if beta is not None and not beta.closed:
                 listeners[code] = ws
                 await safe_str(ws, "OK")
                 await safe_str(beta, "READY")
                 if code in last_info:
                     await safe_str(ws, last_info[code])
-                log(code, "Alpha conectado; READY enviado a Beta")
+                log(code, "Alpha conectado → READY enviado a Beta")
             else:
                 pending[code] = ws
                 await safe_str(ws, "WAITING")
@@ -249,11 +249,11 @@ async def handle(request):
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     beta = emitters.get(code)
-                    if beta and not beta.closed:
+                    if beta is not None and not beta.closed:
                         await safe_str(beta, msg.data.strip())
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     beta = emitters.get(code)
-                    if beta and not beta.closed:
+                    if beta is not None and not beta.closed:
                         await safe_bytes(beta, msg.data)
                 elif msg.type in (
                     aiohttp.WSMsgType.CLOSE,
@@ -276,7 +276,7 @@ async def handle(request):
             if code in last_info:
                 await safe_str(ws, last_info[code])
             beta = emitters.get(code)
-            if beta and not beta.closed:
+            if beta is not None and not beta.closed:
                 await safe_str(beta, "GET_INFO")
             async for msg in ws:
                 if msg.type in (
