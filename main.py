@@ -24,14 +24,8 @@ def log(code, msg):
 def gen_code():
     for _ in range(10000):
         code = f"{secrets.randbelow(10000):04d}"
-
-        if (
-            code not in emitters
-            and code not in listeners
-            and code not in pending
-        ):
+        if code not in emitters and code not in listeners and code not in pending:
             return code
-
     raise RuntimeError("No hay códigos disponibles")
 
 
@@ -42,7 +36,7 @@ async def safe_str(ws, msg):
             await ws.send_str(msg)
             return True
     except Exception as e:
-        log("safe_str", f"ERROR enviando texto '{msg[:30]}': {e}")
+        log("safe_str", f"ERROR enviando '{msg[:30]}': {e}")
     return False
 
 
@@ -56,21 +50,28 @@ async def safe_bytes(ws, data):
     return False
 
 
-# ── Envío de CODE con reintentos ──────────────────────────────────────────────
+# ── Envío de CODE: inmediato + reintentos en segundo plano ───────────────────
 async def send_code(ws, code):
-    """Envía CODE:XXXX con hasta 3 intentos. Retorna True si tuvo éxito."""
-    for attempt in range(3):
-        await asyncio.sleep(0.3 + attempt * 0.4)   # 0.3s, 0.7s, 1.1s
+    ok = await safe_str(ws, f"CODE:{code}")
+    if ok:
+        log(code, f"CODE:{code} enviado a Beta (inmediato)")
+    else:
+        log(code, f"CODE:{code} fallo inmediato - iniciando reintentos")
+    return ok
+
+
+async def retry_code_task(ws, code):
+    """Reenvía CODE: cada segundo por hasta 15s o hasta que Alpha se conecte."""
+    for i in range(15):
+        await asyncio.sleep(1)
+        if code in listeners or code in pending:
+            return
         if not ws or ws.closed:
-            log(code, f"send_code: ws cerrado en intento {attempt + 1}")
-            return False
+            log(code, f"retry_code: ws cerrado tras {i + 1}s")
+            return
         ok = await safe_str(ws, f"CODE:{code}")
         if ok:
-            log(code, f"CODE:{code} enviado a Beta (intento {attempt + 1})")
-            return True
-        log(code, f"send_code: fallo intento {attempt + 1}")
-    log(code, f"ERROR: no se pudo enviar CODE:{code} tras 3 intentos")
-    return False
+            log(code, f"CODE:{code} reenviado (t+{i + 1}s)")
 
 
 # ── Limpieza de conexiones ────────────────────────────────────────────────────
@@ -79,16 +80,13 @@ async def cleanup(code, role, ws):
 
     if role == "BETA":
         is_current = emitters.get(code) is ws
-
         if is_current:
             emitters.pop(code, None)
             last_seen.pop(code, None)
-
             alpha = listeners.get(code)
             if alpha and not alpha.closed:
                 await safe_str(alpha, "EMITTER_GONE")
                 log(code, "EMITTER_GONE enviado a Alpha")
-
             alpha_pending = pending.get(code)
             if alpha_pending and not alpha_pending.closed:
                 await safe_str(alpha_pending, "EMITTER_GONE")
@@ -96,27 +94,21 @@ async def cleanup(code, role, ws):
 
     elif role == "ALPHA":
         was_listener = listeners.get(code) is ws
-        was_pending  = pending.get(code) is ws
-
+        was_pending = pending.get(code) is ws
         if was_listener:
             listeners.pop(code, None)
-
         if was_pending:
             pending.pop(code, None)
-
         if was_listener and listeners.get(code) is None:
             beta = emitters.get(code)
-
             if beta and not beta.closed:
                 await safe_str(beta, "STOP")
                 log(code, "STOP enviado a Beta: Alpha desconectado")
 
     elif role == "WATCHER":
         group = watchers.get(code)
-
         if group is not None:
             group.discard(ws)
-
             if not group:
                 watchers.pop(code, None)
 
@@ -127,22 +119,16 @@ async def self_ping(app):
         "RAILWAY_STATIC_URL",
         os.environ.get("RENDER_EXTERNAL_URL", "")
     )
-
     if not url:
         log("SYSTEM", "Sin URL pública configurada para self-ping")
         return
-
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-
     url = url.rstrip("/") + "/ping"
-
     timeout = aiohttp.ClientTimeout(total=10)
-
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
             await asyncio.sleep(240)
-
             try:
                 async with session.get(url) as response:
                     await asyncio.sleep(0)
@@ -159,8 +145,6 @@ async def handle_ping(request):
 
 # ── Handler principal de WebSocket ────────────────────────────────────────────
 async def handle(request):
-    # heartbeat=25: no coincide con los pings de OkHttp (cada 5s),
-    # evita que ambos lados manden pings al mismo tiempo.
     ws = web.WebSocketResponse(heartbeat=25)
     await ws.prepare(request)
 
@@ -168,11 +152,10 @@ async def handle(request):
     role = None
 
     try:
-        # Primer mensaje: identificación del cliente.
         try:
             msg = await asyncio.wait_for(ws.receive(), timeout=15)
         except asyncio.TimeoutError:
-            log("???", "Timeout esperando identificación")
+            log("???", "Timeout esperando identificacion")
             await ws.close()
             return ws
 
@@ -188,7 +171,6 @@ async def handle(request):
 
             if text.startswith("EMIT:"):
                 code = text[5:].strip()
-
                 if not code.isdigit() or len(code) != 4:
                     await safe_str(ws, "ERROR:INVALID_CODE")
                     await ws.close()
@@ -204,56 +186,45 @@ async def handle(request):
             role = "BETA"
             log(code, "Beta conectado")
 
-            # Cerrar Beta anterior, si existe.
             old = emitters.get(code)
-
             if old and not old.closed:
                 try:
                     await old.close()
                 except Exception:
                     pass
 
-            # Registrar la nueva conexión.
             emitters[code] = ws
             last_seen[code] = time.time()
             watchers.setdefault(code, set())
 
-            # Enviar CODE: con reintentos.
+            # Enviar CODE: inmediatamente + reintentos en segundo plano
             await send_code(ws, code)
+            asyncio.create_task(retry_code_task(ws, code))
 
-            # Conectar automáticamente al Alpha en espera.
+            # Conectar automáticamente al Alpha en espera
             alpha_pending = pending.get(code)
-
             if alpha_pending and not alpha_pending.closed:
                 pending.pop(code, None)
                 listeners[code] = alpha_pending
-
                 await safe_str(alpha_pending, "OK")
                 await safe_str(ws, "READY")
-
                 if code in last_info:
                     await safe_str(alpha_pending, last_info[code])
-
-                log(code, "Alpha en espera conectado automáticamente; READY enviado")
-
+                log(code, "Alpha en espera conectado; READY enviado")
             else:
                 alpha = listeners.get(code)
-
                 if alpha and not alpha.closed:
                     await safe_str(alpha, "OK")
                     await safe_str(ws, "READY")
                     log(code, "Alpha existente; READY enviado a Beta")
 
-            # Loop principal de Beta.
+            # Loop principal de Beta
             async for msg in ws:
-
                 if msg.type == aiohttp.WSMsgType.BINARY:
                     last_seen[code] = time.time()
                     alpha = listeners.get(code)
-
                     if alpha and not alpha.closed:
                         ok = await safe_bytes(alpha, msg.data)
-
                         if not ok and listeners.get(code) is alpha:
                             listeners.pop(code, None)
                             log(code, "Alpha caído durante transmisión")
@@ -265,35 +236,27 @@ async def handle(request):
                     if txt.startswith("INFO|"):
                         last_info[code] = txt
                         alpha = listeners.get(code)
-
                         if alpha and not alpha.closed:
                             await safe_str(alpha, txt)
-
                         dead = set()
-
                         for watcher in list(watchers.get(code, set())):
                             if watcher.closed:
                                 dead.add(watcher)
                             else:
                                 ok = await safe_str(watcher, txt)
-
                                 if not ok:
                                     dead.add(watcher)
-
                         group = watchers.get(code)
-
                         if group is not None:
                             group.difference_update(dead)
 
                     elif txt == "GET_INFO":
                         alpha = listeners.get(code)
-
                         if alpha and not alpha.closed:
                             await safe_str(alpha, txt)
 
                     else:
                         alpha = listeners.get(code)
-
                         if alpha and not alpha.closed:
                             await safe_str(alpha, txt)
 
@@ -307,7 +270,6 @@ async def handle(request):
         # ── ALPHA: RECEPTOR ───────────────────────────────────────────────────
         elif text.startswith("JOIN:"):
             code = text[5:].strip()
-
             if not code.isdigit() or len(code) != 4:
                 await safe_str(ws, "ERROR:INVALID_CODE")
                 await ws.close()
@@ -316,7 +278,6 @@ async def handle(request):
             role = "ALPHA"
 
             old = listeners.get(code)
-
             if old and not old.closed:
                 try:
                     await old.close()
@@ -324,7 +285,6 @@ async def handle(request):
                     pass
 
             old_pending = pending.get(code)
-
             if old_pending and not old_pending.closed:
                 try:
                     await old_pending.close()
@@ -332,38 +292,29 @@ async def handle(request):
                     pass
 
             beta = emitters.get(code)
-
             if beta and not beta.closed:
                 listeners[code] = ws
-
                 await safe_str(ws, "OK")
                 await safe_str(beta, "READY")
-
                 if code in last_info:
                     await safe_str(ws, last_info[code])
-
                 log(code, "Alpha conectado; READY enviado a Beta")
-
             else:
                 pending[code] = ws
                 await safe_str(ws, "WAITING")
                 log(code, "Alpha esperando a que aparezca Beta")
 
             async for msg in ws:
-
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     txt = msg.data.strip()
                     beta = emitters.get(code)
-
                     if beta and not beta.closed:
                         ok = await safe_str(beta, txt)
-
                         if ok:
                             log(code, f"Comando Alpha -> Beta: {txt}")
 
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     beta = emitters.get(code)
-
                     if beta and not beta.closed:
                         await safe_bytes(beta, msg.data)
 
@@ -377,7 +328,6 @@ async def handle(request):
         # ── WATCHER: SOLO INFORMACIÓN ─────────────────────────────────────────
         elif text.startswith("WATCH:"):
             code = text[6:].strip()
-
             if not code.isdigit() or len(code) != 4:
                 await safe_str(ws, "ERROR:INVALID_CODE")
                 await ws.close()
@@ -385,7 +335,6 @@ async def handle(request):
 
             role = "WATCHER"
             watchers.setdefault(code, set()).add(ws)
-
             await safe_str(ws, "WATCHING")
             log(code, "Watcher conectado")
 
@@ -393,7 +342,6 @@ async def handle(request):
                 await safe_str(ws, last_info[code])
 
             beta = emitters.get(code)
-
             if beta and not beta.closed:
                 await safe_str(beta, "GET_INFO")
 
@@ -423,7 +371,6 @@ async def handle(request):
                 await cleanup(code, role, ws)
             except Exception as e:
                 log(code, f"Error durante limpieza: {e}")
-
         if not ws.closed:
             try:
                 await ws.close()
@@ -456,12 +403,10 @@ async def main():
         await asyncio.Future()
     finally:
         ping_task.cancel()
-
         try:
             await ping_task
         except asyncio.CancelledError:
             pass
-
         await runner.cleanup()
 
 
