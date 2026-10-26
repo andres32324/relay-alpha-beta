@@ -248,9 +248,14 @@ async def handle(request):
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
+                    txt = msg.data.strip()
+                    # No reenviar mensajes que son exclusivos del servidor
+                    if txt in ("READY", "OK", "WAITING", "WATCHING", "EMITTER_GONE") or txt.startswith("CODE:") or txt.startswith("ERROR:"):
+                        log(code, f"Alpha envio mensaje reservado (ignorado): {txt}")
+                        continue
                     beta = emitters.get(code)
                     if beta is not None and not beta.closed:
-                        await safe_str(beta, msg.data.strip())
+                        await safe_str(beta, txt)
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     beta = emitters.get(code)
                     if beta is not None and not beta.closed:
