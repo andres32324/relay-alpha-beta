@@ -313,6 +313,7 @@ async def handle(request):
                     aiohttp.WSMsgType.CLOSED,
                     aiohttp.WSMsgType.ERROR
                 ):
+                    log(code, f'Alpha cierre: tipo={msg.type.name} data={msg.data!r}')
                     break
 
         # ── WATCHER ───────────────────────────────────────────────────────────
