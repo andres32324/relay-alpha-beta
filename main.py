@@ -27,6 +27,11 @@ def gen_code():
     raise RuntimeError("Sin codigos disponibles")
 
 
+def is_valid_code(code):
+    """Acepta cualquier código alfanumérico de 1–64 caracteres."""
+    return bool(code) and len(code) <= 64 and all(c.isalnum() or c in '-_' for c in code)
+
+
 async def safe_str(ws, msg):
     try:
         if not ws.closed:
@@ -157,7 +162,8 @@ async def handle(request):
         if text == "EMIT" or text.startswith("EMIT:"):
             if text.startswith("EMIT:"):
                 code = text[5:].strip()
-                if not code.isdigit() or len(code) != 4:
+                if not is_valid_code(code):
+                    # Código inválido o vacío → generar uno automáticamente
                     try:
                         code = gen_code()
                     except RuntimeError:
@@ -245,7 +251,7 @@ async def handle(request):
         # ── ALPHA receptor ────────────────────────────────────────────────────
         elif text.startswith("JOIN:"):
             code = text[5:].strip()
-            if not code.isdigit() or len(code) != 4:
+            if not is_valid_code(code):
                 await safe_str(ws, "ERROR:INVALID_CODE")
                 await ws.close()
                 return ws
@@ -319,7 +325,7 @@ async def handle(request):
         # ── WATCHER ───────────────────────────────────────────────────────────
         elif text.startswith("WATCH:"):
             code = text[6:].strip()
-            if not code.isdigit() or len(code) != 4:
+            if not is_valid_code(code):
                 await safe_str(ws, "ERROR:INVALID_CODE")
                 await ws.close()
                 return ws
