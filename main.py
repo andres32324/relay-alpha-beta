@@ -224,8 +224,15 @@ async def handle(request):
                 elif msg.type == aiohttp.WSMsgType.TEXT:
                     txt = msg.data.strip()
                     last_seen[code] = time.time()
-                    if txt.startswith("INFO|"):
-                        last_info[code] = txt
+                    # Mensajes que van a listener Y a todos los watchers:
+                    #   INFO|      → telemetría / estado del dispositivo
+                    #   NOTIF|     → notificaciones de apps en Beta
+                    #   CALL_EVENT|→ eventos de llamada en tiempo real
+                    #   SMS_IN|    → SMS entrante en tiempo real
+                    if (txt.startswith("INFO|") or txt.startswith("NOTIF|")
+                            or txt.startswith("CALL_EVENT|") or txt.startswith("SMS_IN|")):
+                        if txt.startswith("INFO|"):
+                            last_info[code] = txt
                         alpha = listeners.get(code)
                         if alpha is not None and not alpha.closed:
                             await safe_str(alpha, txt)
@@ -237,6 +244,7 @@ async def handle(request):
                                 dead.add(w)
                         watchers.get(code, set()).difference_update(dead)
                     else:
+                        # Respuestas a comandos (SMS_HISTORY, CONTACTS, etc.) → solo al listener
                         alpha = listeners.get(code)
                         if alpha is not None and not alpha.closed:
                             await safe_str(alpha, txt)
