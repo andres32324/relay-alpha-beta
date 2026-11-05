@@ -7,11 +7,11 @@ import secrets
 
 emitters = {}
 listeners = {}
-pending   = {}
 watchers  = {}
 last_info = {}
 last_seen = {}
-pending_stops = {}   # code → asyncio.Task (STOP diferido)
+pending_stops = {}       # code → asyncio.Task (STOP diferido para Alpha)
+pending_beta_gone = {}   # code → asyncio.Task (EMITTER_GONE diferido para Beta reconexión)
 
 
 def log(code, msg):
@@ -22,7 +22,7 @@ def log(code, msg):
 def gen_code():
     for _ in range(10000):
         code = f"{secrets.randbelow(10000):04d}"
-        if code not in emitters and code not in listeners and code not in pending:
+        if code not in emitters and code not in listeners:
             return code
     raise RuntimeError("Sin codigos disponibles")
 
@@ -64,10 +64,9 @@ async def send_stop_delayed(code, delay=8.0):
     """Enviar STOP a Beta solo si Alpha no reconectó en <delay> segundos."""
     try:
         await asyncio.sleep(delay)
-        # Solo mandar STOP si Alpha sigue desconectado (no hay listener activo)
+        # Solo mandar STOP si Alpha sigue desconectado
         alpha = listeners.get(code)
-        alpha_p = pending.get(code)
-        if (alpha is None or alpha.closed) and (alpha_p is None or alpha_p.closed):
+        if alpha is None or alpha.closed:
             beta = emitters.get(code)
             if beta is not None and not beta.closed:
                 await safe_str(beta, "STOP")
@@ -80,28 +79,57 @@ async def send_stop_delayed(code, delay=8.0):
         pending_stops.pop(code, None)
 
 
+def cancel_pending_beta_gone(code):
+    """Cancelar EMITTER_GONE diferido si Beta reconectó antes del timeout."""
+    task = pending_beta_gone.pop(code, None)
+    if task and not task.done():
+        task.cancel()
+        log(code, "EMITTER_GONE cancelado — Beta reconectó a tiempo")
+
+
+async def notify_emitter_gone_delayed(code, delay=5.0):
+    """Enviar EMITTER_GONE a Alpha solo si Beta no reconectó en <delay> segundos.
+
+    Período de gracia para reconexiones breves de Beta (fluctuaciones de red móvil).
+    Si Beta vuelve dentro del tiempo, Alpha nunca se entera y el audio continúa.
+    """
+    try:
+        await asyncio.sleep(delay)
+        # Verificar que Beta sigue sin conectarse (ningún ws activo)
+        current_beta = emitters.get(code)
+        if current_beta is not None and not current_beta.closed:
+            log(code, "EMITTER_GONE omitido — Beta ya reconectó")
+            return
+        # Beta sigue ausente → notificar a Alpha (si está en listeners)
+        alpha = listeners.get(code)
+        if alpha is not None and not alpha.closed:
+            await safe_str(alpha, "EMITTER_GONE")
+        log(code, f"EMITTER_GONE enviado a Alpha (Beta no reconectó en {delay}s)")
+    except asyncio.CancelledError:
+        pass  # Cancelado porque Beta reconectó
+    finally:
+        pending_beta_gone.pop(code, None)
+
+
 async def cleanup(code, role, ws):
     log(code, f"Limpiando {role}")
     if role == "BETA":
         if emitters.get(code) is ws:
             emitters.pop(code, None)
             last_seen.pop(code, None)
-            alpha = listeners.get(code)
-            if alpha is not None and not alpha.closed:
-                await safe_str(alpha, "EMITTER_GONE")
-            alpha_p = pending.get(code)
-            if alpha_p is not None and not alpha_p.closed:
-                await safe_str(alpha_p, "EMITTER_GONE")
+            # Período de gracia: esperar 5s antes de notificar EMITTER_GONE a Alpha.
+            # Si Beta reconecta en ese tiempo (común en redes móviles), Alpha no
+            # se entera y el audio continúa sin ciclo JOIN→WATCH→JOIN.
+            cancel_pending_beta_gone(code)
+            task = asyncio.create_task(notify_emitter_gone_delayed(code, delay=5.0))
+            pending_beta_gone[code] = task
+            log(code, "Beta desconectado — EMITTER_GONE diferido 5s")
     elif role == "ALPHA":
         was_l = listeners.get(code) is ws
-        was_p = pending.get(code) is ws
         if was_l:
             listeners.pop(code, None)
-        if was_p:
-            pending.pop(code, None)
-        if was_l and listeners.get(code) is None:
             # No mandar STOP inmediatamente — esperar 8s por si Alpha reconecta
-            # (8s cubre el ciclo: 1er reintento 2s + falla + 2º reintento 4s ≈ 7s)
+            # (8s cubre el ciclo: 1er reintento 500ms + reintentos sucesivos < 8s)
             cancel_pending_stop(code)
             task = asyncio.create_task(send_stop_delayed(code, delay=8.0))
             pending_stops[code] = task
@@ -139,7 +167,7 @@ async def handle_ping(request):
 
 
 async def handle(request):
-    ws = web.WebSocketResponse(heartbeat=15)
+    ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
     code = None
     role = None
@@ -181,6 +209,10 @@ async def handle(request):
             role = "BETA"
             log(code, "Beta conectado")
 
+            # Si hay un EMITTER_GONE diferido (reconexión tras caída breve), cancelarlo.
+            # Esto evita que Alpha cicle cuando Beta vuelve dentro del período de gracia.
+            cancel_pending_beta_gone(code)
+
             old = emitters.get(code)
             if old is not None and not old.closed:
                 try:
@@ -195,23 +227,12 @@ async def handle(request):
             await safe_str(ws, f"CODE:{code}")
             log(code, f"CODE:{code} enviado")
 
-            # Alpha en espera (pending)
-            alpha_p = pending.get(code)
-            if alpha_p is not None and not alpha_p.closed:
-                pending.pop(code, None)
-                listeners[code] = alpha_p
-                await safe_str(alpha_p, "OK")
+            # Si Alpha ya está conectado como listener, enviar READY a Beta
+            alpha = listeners.get(code)
+            if alpha is not None and not alpha.closed:
+                await safe_str(alpha, "OK")
                 await safe_str(ws, "READY")
-                if code in last_info:
-                    await safe_str(alpha_p, last_info[code])
-                log(code, "Alpha en espera → READY enviado a Beta")
-            else:
-                # Alpha ya conectado (listener)
-                alpha = listeners.get(code)
-                if alpha is not None and not alpha.closed:
-                    await safe_str(alpha, "OK")
-                    await safe_str(ws, "READY")
-                    log(code, "Alpha ya conectado → READY enviado a Beta")
+                log(code, "Alpha ya conectado → READY enviado a Beta")
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
@@ -278,16 +299,9 @@ async def handle(request):
                     await old.close()
                 except Exception:
                     pass
-            old_p = pending.get(code)
-            if old_p is not None and not old_p.closed:
-                try:
-                    await old_p.close()
-                except Exception:
-                    pass
 
-            # Cancelar DE NUEVO: durante los await old.close() el cleanup de la
-            # conexión vieja pudo haber creado un nuevo timer en pending_stops.
-            # (asyncio ejecuta el cleanup de old_ws mientras esperamos el cierre)
+            # Cancelar DE NUEVO: durante el await old.close() el cleanup del
+            # listener viejo pudo haber creado un nuevo timer en pending_stops.
             cancel_pending_stop(code)
 
             beta = emitters.get(code)
@@ -299,9 +313,13 @@ async def handle(request):
                     await safe_str(ws, last_info[code])
                 log(code, "Alpha conectado → READY enviado a Beta")
             else:
-                pending[code] = ws
+                # Beta no disponible — cerrar inmediatamente.
+                # Alpha reintentará solo (como en relay estable).
+                # Sin estado pending: sin race conditions.
                 await safe_str(ws, "WAITING")
-                log(code, "Alpha esperando a Beta")
+                log(code, "Beta no disponible — Alpha debe reintentar")
+                await ws.close()
+                return ws
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
