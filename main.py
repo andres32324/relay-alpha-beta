@@ -235,10 +235,16 @@ async def handle(request):
                 log(code, "Alpha ya conectado (listener) → READY enviado a Beta")
             elif any(not w.closed for w in watchers.get(code, set())):
                 # Alpha está en modo WATCH (switchToWatch tras stopAudio).
-                # Beta igual empieza a capturar; cuando Alpha vuelva a JOIN
-                # el relay mandará otro READY y el ciclo queda limpio.
+                # 1) READY → Beta empieza a capturar audio ya.
+                # 2) EMITTER_BACK → si DeviceConnection lo maneja en modo WATCH,
+                #    Alpha hará switchToJoin() automáticamente y el audio fluirá
+                #    sin que el usuario pulse LINK de nuevo.
                 await safe_str(ws, "READY")
                 log(code, "Alpha en WATCH → READY enviado a Beta")
+                for w in list(watchers.get(code, set())):
+                    if not w.closed:
+                        await safe_str(w, "EMITTER_BACK")
+                log(code, "EMITTER_BACK enviado a watchers → esperando switchToJoin")
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
