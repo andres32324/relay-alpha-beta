@@ -232,7 +232,13 @@ async def handle(request):
             if alpha is not None and not alpha.closed:
                 await safe_str(alpha, "OK")
                 await safe_str(ws, "READY")
-                log(code, "Alpha ya conectado → READY enviado a Beta")
+                log(code, "Alpha ya conectado (listener) → READY enviado a Beta")
+            elif any(not w.closed for w in watchers.get(code, set())):
+                # Alpha está en modo WATCH (switchToWatch tras stopAudio).
+                # Beta igual empieza a capturar; cuando Alpha vuelva a JOIN
+                # el relay mandará otro READY y el ciclo queda limpio.
+                await safe_str(ws, "READY")
+                log(code, "Alpha en WATCH → READY enviado a Beta")
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
