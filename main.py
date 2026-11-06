@@ -1,4 +1,4 @@
-import asyncio 
+import asyncio
 import aiohttp
 from aiohttp import web
 import os
@@ -67,6 +67,17 @@ async def send_stop_delayed(code, delay=8.0):
         # Solo mandar STOP si Alpha sigue desconectado
         alpha = listeners.get(code)
         if alpha is None or alpha.closed:
+            # Comprobar si Alpha está en modo WATCH (switchToWatch tras stopAudio).
+            # En ese caso NO mandar STOP a Beta — Alpha sigue presente, solo pasivo.
+            # Mandamos EMITTER_BACK al watcher para que Alpha vuelva a JOIN
+            # sin que Beta reciba STOP y reinicie su grace de 12 s.
+            ws_set = watchers.get(code, set())
+            active_watchers = [w for w in ws_set if not w.closed]
+            if active_watchers:
+                for w in active_watchers:
+                    await safe_str(w, "EMITTER_BACK")
+                log(code, "Alpha en WATCH — STOP omitido, EMITTER_BACK enviado a watchers")
+                return
             beta = emitters.get(code)
             if beta is not None and not beta.closed:
                 await safe_str(beta, "STOP")
