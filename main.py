@@ -390,6 +390,14 @@ async def handle(request):
             beta = emitters.get(code)
             if beta is not None and not beta.closed:
                 await safe_str(beta, "GET_INFO")
+                # El watcher (re)conectó y Beta ya está online: notificarlo
+                # para que Alpha active JOIN de inmediato sin esperar el
+                # siguiente intervalo de backoff (que puede ser hasta 30s).
+                # El guard isConnectionInJoinMode() en Alpha filtra:
+                #   - primer WATCH (connection=null) → no arranca sólo
+                #   - UNLINK deliberado (mode=WATCH) → no auto-reconecta
+                #   - WAIT durante retry (mode=JOIN, !connected) → reconecta ✅
+                await safe_str(ws, "EMITTER_BACK")
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     # Comandos del watcher → reenviar a Beta
