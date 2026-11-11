@@ -139,12 +139,20 @@ async def cleanup(code, role, ws):
         was_l = listeners.get(code) is ws
         if was_l:
             listeners.pop(code, None)
-            # No mandar STOP inmediatamente — esperar 8s por si Alpha reconecta
-            # (8s cubre el ciclo: 1er reintento 500ms + reintentos sucesivos < 8s)
-            cancel_pending_stop(code)
-            task = asyncio.create_task(send_stop_delayed(code, delay=8.0))
-            pending_stops[code] = task
-            log(code, "Alpha desconectado — STOP diferido 8s")
+            # Solo diferir STOP si Beta está AHORA online.
+            # Si Beta ya está offline, no hay nada que parar y crear el timer
+            # solo introduce una carrera: si Beta vuelve antes de que Alpha
+            # reintente el JOIN, el timer de 8s puede ganarle a Alpha.
+            # (Escenario 02:02 del log: Beta offline → timer innecesario → STOP
+            #  llegó 1-2s antes que el retry de Alpha)
+            beta = emitters.get(code)
+            if beta is not None and not beta.closed:
+                cancel_pending_stop(code)
+                task = asyncio.create_task(send_stop_delayed(code, delay=8.0))
+                pending_stops[code] = task
+                log(code, "Alpha desconectado — STOP diferido 8s (Beta online)")
+            else:
+                log(code, "Alpha desconectado — sin STOP (Beta ya offline)")
     elif role == "WATCHER":
         group = watchers.get(code)
         if group is not None:
